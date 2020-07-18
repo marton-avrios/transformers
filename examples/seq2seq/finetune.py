@@ -1,5 +1,6 @@
 import argparse
 import glob
+from itertools import starmap
 import logging
 import os
 import time
@@ -10,6 +11,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pytorch_lightning as pl
+from textdistance import levenshtein
 import torch
 from torch.utils.data import DataLoader
 
@@ -335,6 +337,25 @@ class TranslationModule(SummarizationModule):
         return calculate_bleu_score(preds, target)
 
 
+class ReadoutModule(SummarizationModule):
+    mode = "readout"
+    loss_names = ["loss"]
+    metric_names = ["levenshtein"]
+    val_metric = "levenshtein"
+
+    def __init__(self, hparams, **kwargs):
+        super().__init__(hparams, **kwargs)
+        self.dataset_kwargs["src_lang"] = hparams.src_lang
+        self.dataset_kwargs["tgt_lang"] = hparams.tgt_lang
+        if self.model.config.decoder_start_token_id is None and isinstance(self.tokenizer, MBartTokenizer):
+            self.decoder_start_token_id = self.tokenizer.lang_code_to_id[hparams.tgt_lang]
+
+    def calc_generative_metrics(self, preds, target) -> dict:
+        preds_target = list(zip(preds, target))
+        distances = list(starmap(levenshtein.distance, preds_target))
+        return {"levenshtein": -np.mean(distances)}
+
+
 def main(args, model=None) -> SummarizationModule:
     Path(args.output_dir).mkdir(exist_ok=True)
     if len(os.listdir(args.output_dir)) > 3 and args.do_train:
@@ -342,8 +363,10 @@ def main(args, model=None) -> SummarizationModule:
     if model is None:
         if args.task == "summarization":
             model: SummarizationModule = SummarizationModule(args)
-        else:
+        elif args.task == "translation":
             model: SummarizationModule = TranslationModule(args)
+        else:
+            model: SummarizationModule = ReadoutModule(args)
 
     dataset = Path(args.data_dir).name
     if (
